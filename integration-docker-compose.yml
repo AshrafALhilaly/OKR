@@ -1,0 +1,201 @@
+# Integrated NotebookLM Columns + Open Notebook Docker Compose
+# This file combines both systems with shared SurrealDB database
+
+version: '3.8'
+
+services:
+  # ========================================
+  # Shared Database: SurrealDB
+  # ========================================
+  surrealdb:
+    image: surrealdb/surrealdb:latest
+    container_name: surrealdb
+    command: start --log trace --user root --pass root file:/mydata/surreal.db
+    ports:
+      - "8000:8000"
+    volumes:
+      - surreal-data:/mydata
+    networks:
+      - notebook-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ========================================
+  # Open Notebook API (Python/FastAPI)
+  # ========================================
+  open-notebook-api:
+    image: lfnovo/open_notebook:v1-latest-single
+    container_name: open-notebook-api
+    ports:
+      - "5055:5055"
+    environment:
+      # Database
+      - SURREAL_URL=ws://surrealdb:8000/rpc
+      - SURREAL_USER=root
+      - SURREAL_PASS=root
+      - SURREAL_NS=notebook
+      - SURREAL_DB=notebook
+      
+      # AI Providers (add your keys)
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      
+      # Optional: Ollama for local AI
+      - OLLAMA_URL=http://ollama:11434
+      
+      # API Configuration
+      - API_HOST=0.0.0.0
+      - API_PORT=5055
+      - LOG_LEVEL=INFO
+    depends_on:
+      surrealdb:
+        condition: service_healthy
+    networks:
+      - notebook-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5055/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ========================================
+  # Open Notebook Frontend (Next.js)
+  # ========================================
+  open-notebook-frontend:
+    image: lfnovo/open_notebook:v1-latest-single
+    container_name: open-notebook-frontend
+    ports:
+      - "8502:8502"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:5055
+      - NEXT_PUBLIC_COLUMNS_URL=http://localhost:3000
+    depends_on:
+      - open-notebook-api
+    networks:
+      - notebook-network
+    restart: unless-stopped
+
+  # ========================================
+  # NotebookLM Columns (Node.js/Express)
+  # ========================================
+  notebook-columns:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: notebook-columns
+    ports:
+      - "3000:3000"
+    environment:
+      # Server Configuration
+      - NODE_ENV=production
+      - PORT=3000
+      - HOST=0.0.0.0
+      
+      # Database (shared with Open Notebook)
+      - SURREAL_URL=ws://surrealdb:8000/rpc
+      - SURREAL_USER=root
+      - SURREAL_PASS=root
+      - SURREAL_NS=notebook
+      - SURREAL_DB=notebook
+      
+      # Integration with Open Notebook
+      - OPEN_NOTEBOOK_API_URL=http://open-notebook-api:5055
+      - ENABLE_OPEN_NOTEBOOK_SYNC=true
+      
+      # AI Providers (shared keys)
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
+      
+      # Optional: Ollama
+      - OLLAMA_URL=http://ollama:11434
+      
+      # Feature Flags
+      - ENABLE_AI_FEATURES=true
+      - MAX_AI_REQUESTS_PER_HOUR=50
+    depends_on:
+      surrealdb:
+        condition: service_healthy
+      open-notebook-api:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+    networks:
+      - notebook-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000/api/notebooks/default"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ========================================
+  # Nginx Reverse Proxy (Unified Access)
+  # ========================================
+  nginx:
+    image: nginx:alpine
+    container_name: nginx-proxy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx-integrated.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - open-notebook-frontend
+      - open-notebook-api
+      - notebook-columns
+    networks:
+      - notebook-network
+    restart: unless-stopped
+
+  # ========================================
+  # Optional: Ollama (Local AI Models)
+  # ========================================
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    networks:
+      - notebook-network
+    restart: unless-stopped
+    # After starting, pull models:
+    # docker exec ollama ollama pull llama2
+    # docker exec ollama ollama pull mistral
+
+  # ========================================
+  # Optional: Redis (Caching)
+  # ========================================
+  redis:
+    image: redis:7-alpine
+    container_name: redis-cache
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-changeme}
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - notebook-network
+    restart: unless-stopped
+
+networks:
+  notebook-network:
+    driver: bridge
+
+volumes:
+  surreal-data:
+    driver: local
+  ollama-data:
+    driver: local
+  redis-data:
+    driver: local

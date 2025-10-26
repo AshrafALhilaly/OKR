@@ -1,0 +1,64 @@
+version: '3.8'
+
+services:
+  notebook-columns:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: notebook-columns-app
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      # Add your AI API keys here or use env_file
+      # - OPENAI_API_KEY=${OPENAI_API_KEY}
+      # - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+    restart: unless-stopped
+    volumes:
+      # Persist logs
+      - ./logs:/app/logs
+      # If using database, persist data
+      # - notebook-data:/app/data
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000/api/notebooks/default"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - notebook-network
+
+  # Optional: Add PostgreSQL for production
+  # postgres:
+  #   image: postgres:15-alpine
+  #   container_name: notebook-postgres
+  #   environment:
+  #     POSTGRES_DB: notebooks
+  #     POSTGRES_USER: notebook_user
+  #     POSTGRES_PASSWORD: ${DB_PASSWORD}
+  #   volumes:
+  #     - postgres-data:/var/lib/postgresql/data
+  #   networks:
+  #     - notebook-network
+  #   restart: unless-stopped
+
+  # Optional: Add Redis for caching
+  # redis:
+  #   image: redis:7-alpine
+  #   container_name: notebook-redis
+  #   command: redis-server --appendonly yes
+  #   volumes:
+  #     - redis-data:/data
+  #   networks:
+  #     - notebook-network
+  #   restart: unless-stopped
+
+networks:
+  notebook-network:
+    driver: bridge
+
+# volumes:
+#   notebook-data:
+#   postgres-data:
+#   redis-data:
