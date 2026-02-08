@@ -1,0 +1,156 @@
+version: '3.8'
+
+# Integrated Research Platform
+# Combines NotebookLM Columns + Open Notebook + SurrealDB
+
+services:
+  # SurrealDB - Shared Database for both services
+  surrealdb:
+    image: surrealdb/surrealdb:latest
+    container_name: research-surrealdb
+    ports:
+      - "8000:8000"
+    command: start --log trace --user root --pass root
+    volumes:
+      - surreal_data:/mydata
+    restart: unless-stopped
+    networks:
+      - research-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Open Notebook - RAG Document Processing & Chat
+  open-notebook:
+    image: lfnovo/open_notebook:v1-latest-single
+    container_name: open-notebook-rag
+    ports:
+      - "8502:8502"  # Streamlit UI
+      - "5055:5055"  # FastAPI Backend
+    environment:
+      # AI Providers (add your keys)
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
+      - GROQ_API_KEY=${GROQ_API_KEY:-}
+      
+      # Database Configuration
+      - SURREAL_URL=ws://surrealdb:8000/rpc
+      - SURREAL_USER=root
+      - SURREAL_PASSWORD=root
+      - SURREAL_NAMESPACE=research_platform
+      - SURREAL_DATABASE=production
+      
+      # Optional: Ollama for local models
+      - OLLAMA_HOST=${OLLAMA_HOST:-}
+      
+    volumes:
+      - notebook_data:/app/data
+    depends_on:
+      surrealdb:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - research-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8502/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # NotebookLM Columns - Structured Analysis
+  notebook-columns:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: notebook-columns
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      
+      # AI Providers (shared with Open Notebook)
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
+      
+      # Integration Configuration
+      - OPEN_NOTEBOOK_API=http://open-notebook:5055
+      - SURREAL_URL=ws://surrealdb:8000/rpc
+      - SURREAL_USER=root
+      - SURREAL_PASSWORD=root
+      - SURREAL_NAMESPACE=research_platform
+      - SURREAL_DATABASE=production
+      
+      # Authentication
+      - JWT_SECRET=${JWT_SECRET:-change-me-in-production}
+      
+    volumes:
+      - ./logs:/app/logs
+    depends_on:
+      surrealdb:
+        condition: service_healthy
+      open-notebook:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - research-network
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000/api/notebooks/default"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Nginx Reverse Proxy - Unified Access Point
+  nginx:
+    image: nginx:alpine
+    container_name: research-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx-integrated.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - open-notebook
+      - notebook-columns
+    restart: unless-stopped
+    networks:
+      - research-network
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:80/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Optional: Ollama for Local AI Models
+  # Uncomment to enable free local models
+  # ollama:
+  #   image: ollama/ollama:latest
+  #   container_name: research-ollama
+  #   ports:
+  #     - "11434:11434"
+  #   volumes:
+  #     - ollama_data:/root/.ollama
+  #   restart: unless-stopped
+  #   networks:
+  #     - research-network
+
+networks:
+  research-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+
+volumes:
+  notebook_data:
+    driver: local
+  surreal_data:
+    driver: local
+  # ollama_data:
+  #   driver: local

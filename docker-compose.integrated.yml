@@ -1,0 +1,125 @@
+version: '3.8'
+
+services:
+  # Open Notebook - Privacy-first RAG platform
+  open-notebook:
+    image: lfnovo/open_notebook:v1-latest-single
+    container_name: open-notebook
+    ports:
+      - "8502:8502"  # Streamlit UI
+      - "5055:5055"  # API
+    volumes:
+      - ./shared-data/notebook_data:/app/data
+      - ./shared-data/surreal_data:/mydata
+      - ./shared-data/documents:/app/documents
+    environment:
+      # AI Provider (choose one or multiple)
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
+      
+      # Or use Ollama for free local models
+      - OLLAMA_HOST=${OLLAMA_HOST:-http://host.docker.internal:11434}
+      
+      # Database
+      - SURREAL_URL=ws://localhost:8000/rpc
+      - SURREAL_USER=root
+      - SURREAL_PASSWORD=root
+      - SURREAL_NAMESPACE=research_platform
+      - SURREAL_DATABASE=production
+      
+      # Integration
+      - COLUMNS_API_URL=http://notebook-columns:3000
+      - ENABLE_COLUMNS_INTEGRATION=true
+    restart: unless-stopped
+    networks:
+      - research-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8502"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # NotebookLM Columns - Structured tabular analysis
+  notebook-columns:
+    build:
+      context: ./columns
+      dockerfile: Dockerfile
+    container_name: notebook-columns
+    ports:
+      - "3000:3000"  # Columns UI
+    volumes:
+      - ./shared-data:/app/shared-data
+      - ./logs:/app/logs
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      
+      # AI Provider (same as Open Notebook)
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
+      
+      # Integration with Open Notebook
+      - OPEN_NOTEBOOK_API=http://open-notebook:5055
+      - OPEN_NOTEBOOK_UI=http://open-notebook:8502
+      - ENABLE_OPEN_NOTEBOOK_RAG=true
+      
+      # Database (shared with Open Notebook)
+      - SURREAL_URL=ws://localhost:8000/rpc
+      - SURREAL_USER=root
+      - SURREAL_PASSWORD=root
+      - SURREAL_NAMESPACE=research_platform
+      - SURREAL_DATABASE=production
+    restart: unless-stopped
+    depends_on:
+      - open-notebook
+    networks:
+      - research-network
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000/api/notebooks/default"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Nginx - Unified gateway (optional)
+  nginx:
+    image: nginx:alpine
+    container_name: research-gateway
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - open-notebook
+      - notebook-columns
+    networks:
+      - research-network
+    restart: unless-stopped
+    profiles:
+      - with-gateway
+
+  # Ollama - Free local LLM (optional)
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+    networks:
+      - research-network
+    restart: unless-stopped
+    profiles:
+      - with-ollama
+    command: serve
+
+networks:
+  research-network:
+    driver: bridge
+
+volumes:
+  ollama-models:
+    driver: local
